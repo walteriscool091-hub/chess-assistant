@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Assistant</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<style>
+  :root { --light:#eeeed2; --dark:#769656; --bg:#161512; --fg:#e8e6e1; --mine:#2ecc71; --opp:#e74c3c; --piece:#3498db; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px system-ui,sans-serif; display:flex; flex-direction:column; align-items:center; padding:12px; }
+  h1 { font-size:20px; margin:4px 0 10px; }
+  #wrap { width:min(96vw,560px); }
+  #board { position:relative; display:grid; grid-template-columns:repeat(8,1fr); aspect-ratio:1; border:3px solid #333; user-select:none; }
+  .sq { position:relative; display:flex; align-items:center; justify-content:center; font-size:min(9vw,50px); cursor:pointer; line-height:1; }
+  .sq.l { background:var(--light); color:#222; } .sq.d { background:var(--dark); color:#222; }
+  .sq.sel { outline:4px solid #f1c40f; outline-offset:-4px; }
+  .sq.last::after { content:""; position:absolute; inset:0; background:rgba(255,235,59,.35); }
+  .sq .dot { position:absolute; width:28%; height:28%; border-radius:50%; background:rgba(0,0,0,.25); }
+  .sq .coord { position:absolute; left:2px; bottom:0; font-size:10px; opacity:.6; }
+  .p { z-index:1; } .p.w { color:#fff; text-shadow:0 0 2px #000,0 0 2px #000,0 0 2px #000; } .p.b { color:#111; }
+  svg#arrows { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+  #status { margin:10px 0 4px; min-height:2.6em; }
+  #status b { color:var(--mine); }
+  .row { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; align-items:center; }
+  button, select, input { background:#2b2a27; color:var(--fg); border:1px solid #444; border-radius:6px; padding:7px 10px; font:inherit; }
+  button { cursor:pointer; } button:hover { background:#3a3935; }
+  input { flex:1; min-width:180px; }
+  .legend span { display:inline-block; width:10px; height:10px; border-radius:50%; margin:0 4px 0 10px; }
+  small { opacity:.7; }
+</style>
+</head>
+<body>
+<h1>Chess Assistant</h1>
+<div id="wrap">
+  <div id="board"><svg id="arrows" viewBox="0 0 8 8"></svg></div>
+  <div id="status"></div>
+  <div class="row legend">
+    <small>Arrows:</small>
+    <small><span style="background:var(--mine)"></span>best move for you</small>
+    <small><span style="background:var(--opp)"></span>opponent's likely move</small>
+    <small><span style="background:var(--piece)"></span>best square for the piece you picked</small>
+  </div>
+  <div class="row">
+    <label>I play <select id="side"><option value="w">White</option><option value="b">Black</option></select></label>
+    <label>Depth <select id="depth"><option>2</option><option selected>3</option><option>4</option></select></label>
+    <label>Promote to <select id="promo"><option value="q">Queen</option><option value="r">Rook</option><option value="b">Bishop</option><option value="n">Knight</option></select></label>
+  </div>
+  <div class="row">
+    <button id="undo">Undo</button><button id="flip">Flip</button><button id="new">New game</button><button id="copy">Copy FEN</button>
+  </div>
+  <div class="row">
+    <input id="fen" placeholder="Paste a FEN to sync with your game">
+    <button id="load">Load</button>
+  </div>
+  <small>Click a piece, then a square, to move. Play both sides here, or mirror your real game's moves in. The arrow updates after every move.</small>
+</div>
+<script>
+const g = new Chess();
+const $ = id => document.getElementById(id);
+const GLYPH = { wk:'\u2654', wq:'\u2655', wr:'\u2656', wb:'\u2657', wn:'\u2658', wp:'\u2659',
+                bk:'\u265A', bq:'\u265B', br:'\u265C', bb:'\u265D', bn:'\u265E', bp:'\u265F' };
+const VAL = { p:100, n:320, b:330, r:500, q:900, k:0 };
+const CB = [0,1,2,3,3,2,1,0];
+let flipped = false, sel = null, lastMove = null, token = 0;
+
+// ---------- engine ----------
+function evaluate(game) {
+  let s = 0;
+  const b = game.board();
+  for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) {
+    const c = b[i][j]; if (!c) continue;
+    const r = 7 - i, f = j, white = c.color === 'w';
+    let v = VAL[c.type], cen = CB[f] + CB[r];
+    if (c.type === 'n' || c.type === 'b') v += cen * 6;
+    else if (c.type === 'p') v += (white ? r : 7 - r) * 8 + CB[f] * 3;
+    else if (c.type === 'q') v += cen * 2;
+    else if (c.type === 'r') v += (white ? (r === 6 ? 15 : 0) : (r === 1 ? 15 : 0));
+    else if (c.type === 'k') v += (white ? (r === 0 ? 15 : -cen * 4) : (r === 7 ? 15 : -cen * 4));
+    s += white ? v : -v;
+  }
+  return game.turn() === 'w' ? s : -s;
+}
+function ordered(game, fromSq) {
+  const ms = game.moves(fromSq ? { square: fromSq, verbose: true } : { verbose: true });
+  for (const m of ms) m._o = (m.captured ? 10 * VAL[m.captured] - VAL[m.piece] : 0) + (m.promotion ? 800 : 0);
+  return ms.sort((a, b) => b._o - a._o);
+}
+function negamax(game, depth, alpha, beta) {
+  if (game.in_checkmate()) return -100000 - depth;
+  if (game.in_draw() || game.in_stalemate()) return 0;
+  if (depth === 0) return evaluate(game);
+  let best = -Infinity;
+  for (const m of ordered(game)) {
+    game.move(m);
+    const sc = -negamax(game, depth - 1, -beta, -alpha);
+    game.undo();
+    if (sc > best) best = sc;
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+function analyze(depth, fromSq) {
+  let best = null, alpha = -Infinity;
+  for (const m of ordered(g, fromSq)) {
+    g.move(m);
+    const sc = -negamax(g, depth - 1, -Infinity, -alpha);
+    g.undo();
+    if (!best || sc > best.score) best = { move: m, score: sc };
+    if (sc > alpha) alpha = sc;
+  }
+  return best;
+}
+
+// ---------- rendering ----------
+const sqName = (f, r) => 'abcdefgh'[f] + (r + 1);
+function center(name) {
+  const f = name.charCodeAt(0) - 97, r = +name[1] - 1;
+  return flipped ? [7 - f + .5, r + .5] : [f + .5, 7 - r + .5];
+}
+function arrow(from, to, color, width) {
+  const [x1, y1] = center(from), [x2, y2] = center(to);
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+  const head = 0.38, sx = x1 + ux * .25, sy = y1 + uy * .25, bx = x2 - ux * head, by = y2 - uy * head;
+  const px = -uy, py = ux, hw = 0.24;
+  return `<line x1="${sx}" y1="${sy}" x2="${bx}" y2="${by}" stroke="${color}" stroke-width="${width}" stroke-linecap="round" opacity=".85"/>` +
+    `<polygon points="${x2},${y2} ${bx + px * hw},${by + py * hw} ${bx - px * hw},${by - py * hw}" fill="${color}" opacity=".9"/>`;
+}
+let arrowsHTML = { main: '', piece: '' };
+function drawArrows() { $('arrows').innerHTML = arrowsHTML.main + arrowsHTML.piece; }
+
+function render() {
+  const board = $('board');
+  [...board.querySelectorAll('.sq')].forEach(e => e.remove());
+  const legal = sel ? g.moves({ square: sel, verbose: true }).map(m => m.to) : [];
+  for (let row = 0; row < 8; row++) for (let col = 0; col < 8; col++) {
+    const f = flipped ? 7 - col : col, r = flipped ? row : 7 - row, name = sqName(f, r);
+    const d = document.createElement('div');
+    d.className = 'sq ' + ((f + r) % 2 === 0 ? 'd' : 'l') + (name === sel ? ' sel' : '') +
+      (lastMove && (name === lastMove.from || name === lastMove.to) ? ' last' : '');
+    d.dataset.sq = name;
+    const p = g.get(name);
+    if (p) { const s = document.createElement('span'); s.className = 'p ' + p.color; s.textContent = GLYPH[p.color + p.type]; d.appendChild(s); }
+    if (legal.includes(name)) { const dot = document.createElement('i'); dot.className = 'dot'; d.appendChild(dot); }
+    if (col === 0) { const c = document.createElement('span'); c.className = 'coord'; c.textContent = r + 1; d.appendChild(c); }
+    d.onclick = () => clickSq(name);
+    board.insertBefore(d, $('arrows'));
+  }
+  drawArrows();
+}
+
+function fmt(score) {
+  if (Math.abs(score) > 90000) return 'mate';
+  return (score / 100 >= 0 ? '+' : '') + (score / 100).toFixed(1);
+}
+function refresh() {
+  const my = $('side').value, turn = g.turn(), t = ++token;
+  arrowsHTML = { main: '', piece: '' };
+  if (g.game_over()) {
+    $('status').textContent = g.in_checkmate() ? 'Checkmate. ' + (turn === 'w' ? 'Black' : 'White') + ' wins.' : 'Game over: draw.';
+    render(); return;
+  }
+  $('status').textContent = 'Thinking...';
+  render();
+  setTimeout(() => {
+    if (t !== token) return;
+    const res = analyze(+$('depth').value);
+    if (t !== token || !res) return;
+    const mine = turn === my, m = res.move;
+    arrowsHTML.main = arrow(m.from, m.to, mine ? 'var(--mine)' : 'var(--opp)', 0.16);
+    const who = turn === 'w' ? 'White' : 'Black';
+    const youScore = turn === my ? res.score : -res.score;
+    $('status').innerHTML = (g.in_check() ? '<b>Check.</b> ' : '') + (mine
+      ? `Your move: <b>${m.san}</b> (${m.from} \u2192 ${m.to}). Eval for you ${fmt(youScore)}.`
+      : `${who} (opponent) to move. Likely: ${m.san}. Eval for you ${fmt(youScore)}.`);
+    drawArrows();
+  }, 20);
+}
+
+function clickSq(name) {
+  const p = g.get(name);
+  if (sel) {
+    const mv = g.moves({ square: sel, verbose: true }).find(m => m.to === name);
+    if (mv) {
+      const done = g.move({ from: sel, to: name, promotion: $('promo').value });
+      lastMove = done; sel = null; refresh(); return;
+    }
+  }
+  if (p && p.color === g.turn() && name !== sel) {
+    sel = name; render();
+    const t = token;
+    setTimeout(() => {
+      if (sel !== name || t !== token) return;
+      const res = analyze(Math.min(+$('depth').value, 3), name);
+      if (res && sel === name) {
+        arrowsHTML.piece = arrow(res.move.from, res.move.to, 'var(--piece)', 0.1);
+        drawArrows();
+      }
+    }, 20);
+  } else { sel = null; render(); }
+}
+
+// ---------- controls ----------
+$('undo').onclick = () => { g.undo(); const h = g.history({ verbose: true }); lastMove = h[h.length - 1] || null; sel = null; refresh(); };
+$('flip').onclick = () => { flipped = !flipped; render(); };
+$('new').onclick = () => { g.reset(); lastMove = null; sel = null; refresh(); };
+$('copy').onclick = () => navigator.clipboard && navigator.clipboard.writeText(g.fen());
+$('load').onclick = () => {
+  const f = $('fen').value.trim();
+  if (f && g.load(f)) { lastMove = null; sel = null; $('fen').value = ''; refresh(); } else alert('Invalid FEN');
+};
+$('side').onchange = () => { flipped = $('side').value === 'b'; refresh(); };
+$('depth').onchange = refresh;
+refresh();
+</script>
+</body>
+</html>
