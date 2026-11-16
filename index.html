@@ -53,6 +53,11 @@
     <input id="fen" placeholder="Paste a FEN to sync with your game">
     <button id="load">Load</button>
   </div>
+  <div class="row">
+    <input id="liveurl" placeholder="Lichess game link, e.g. https://lichess.org/AbCdEfGh">
+    <button id="golive">Go live</button><button id="stoplive">Stop</button>
+  </div>
+  <div id="liveinfo" style="min-height:1.4em;margin:4px 0"></div>
   <small>Click a piece, then a square, to move. Play both sides here, or mirror your real game's moves in. The arrow updates after every move.</small>
 </div>
 <script>
@@ -179,6 +184,7 @@ function refresh() {
 }
 
 function clickSq(name) {
+  if (typeof liveOn !== 'undefined' && liveOn) return;
   const p = g.get(name);
   if (sel) {
     const mv = g.moves({ square: sel, verbose: true }).find(m => m.to === name);
@@ -214,5 +220,6 @@ $('side').onchange = () => { flipped = $('side').value === 'b'; refresh(); };
 $('depth').onchange = refresh;
 refresh();
 </script>
+<script src="live.js"></script>
 </body>
 </html>
